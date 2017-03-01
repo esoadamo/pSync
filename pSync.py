@@ -25,6 +25,7 @@ from collections import Counter
 
 version = 0.8
 
+
 def main():
     if Params.param_exists('-V'):
         print('pSync v%s' % version)
@@ -320,7 +321,6 @@ def list_files(directory, relative=False, files=True, directories=True):
 
 def get_file_name(path):
     """Parses filename from path"""
-    import os.path
     head, tail = os.path.split(path)
     return tail or os.path.basename(head)
 
@@ -338,22 +338,26 @@ def get_file_hash(file, algorithm, count=1, strict=False):
         return None
     file_hash = None
     if count == 1:
-        file_reader = open(file, 'rb')
-        file_bytes = file_reader.read(16 * 1024 * 1024)
-        file_reader.close()
-
         if algorithm == 'sha256':
-            file_hash = hashlib.sha256(file_bytes).hexdigest()
+            hash_function = hashlib.sha256()
         elif algorithm == 'sha1':
-            file_hash = hashlib.sha1(file_bytes).hexdigest()
+            hash_function = hashlib.sha1()
         elif algorithm == 'md5':
-            file_hash = hashlib.md5(file_bytes).hexdigest()
+            hash_function = hashlib.md5()
         elif algorithm == 'sha512':
-            file_hash = hashlib.sha512(file_bytes).hexdigest()
+            hash_function = hashlib.sha512()
         else:
             return None
 
+        file_reader = open(file, 'rb')
+        while True:
+            file_bytes = file_reader.read(16 * 1024 * 1024)
+            if not file_bytes:
+                break
+            hash_function.update(file_bytes)
         del file_bytes
+        file_reader.close()
+        file_hash = hash_function.hexdigest()
     else:
         c = None
         while c is None:
