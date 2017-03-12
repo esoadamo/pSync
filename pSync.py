@@ -21,7 +21,6 @@ import sys
 import shutil
 import sqlite3
 import time
-from collections import Counter
 
 version = 0.8
 
@@ -175,14 +174,14 @@ def main():
                         break
             if file_already_hashed:
                 if file_hash == database_hash:
-                    line += ' OK'
+                    line = 'OK ' + line
                     if use_sql:
                         sql.execute("UPDATE hashes SET found=1 "
                                     "WHERE file=?", (file,))
                 else:
                     force_verbose = True
                     no_modifications = False
-                    line += ' MODIFIED'
+                    line = 'MODIFIED ' + line
                     modified_files.append(file)
                     if use_sql:
                         sql.execute("UPDATE hashes SET hash=?, modified=?, found=1 "
@@ -190,14 +189,14 @@ def main():
                 if not use_sql:
                     hashes.pop(file, None)  # Delete this hash from memory when found
             else:
-                line += ' NEW'
+                line = 'NEW' + line
                 no_modifications = False
                 force_verbose = True
                 new_files.append(file)
                 if use_sql:
                     sql.execute("INSERT INTO hashes VALUES (?, ?, ?, 1)", (file, file_hash, time_start))
         else:
-            line += ' INDEXING'
+            line = 'INDEXED ' + line
             new_files.append(file)
             if use_sql:
                 sql.execute("INSERT INTO hashes VALUES (?, ?, ?, 1)", (file, file_hash, time_start))
@@ -234,7 +233,7 @@ def main():
         # All files inside hashes dict were not found on the disk, so they had to be deleted
         for deleted_file, hash_value in hashes.items():
             no_modifications = False
-            print(deleted_file + ' DELETED')
+            print('DELETED ' + deleted_file)
             deleted_files.append(deleted_file)
         if no_modifications:
             print('No modifications made')
@@ -311,7 +310,7 @@ def list_files(directory, relative=False, files=True, directories=True):
     for file in os.listdir(directory):
         file_path = directory + os.sep + file
         if os.path.isdir(file_path):
-            listed_files.extend(list_files(file_path))
+            listed_files.extend(list_files(file_path, relative, files, directories))
             if directories:
                 listed_files.append(file_path)
         elif files:
@@ -325,51 +324,35 @@ def get_file_name(path):
     return tail or os.path.basename(head)
 
 
-def get_file_hash(file, algorithm, count=1, strict=False):
+def get_file_hash(file, algorithm):
     """
     Hashes file and returns its hash
     :param file: file to be hashed
     :param algorithm: algorithm used for hashing
-    :param count: default 1; how many times hash file to make sure that result is right
-    :param strict: default False; if True then hashing will continue until all tries returned same hash
     :return: hash of the file or None when file does not exists or None when wrong algorithm is used
     """
     if not os.path.isfile(file):
         return None
-    file_hash = None
-    if count == 1:
-        if algorithm == 'sha256':
-            hash_function = hashlib.sha256()
-        elif algorithm == 'sha1':
-            hash_function = hashlib.sha1()
-        elif algorithm == 'md5':
-            hash_function = hashlib.md5()
-        elif algorithm == 'sha512':
-            hash_function = hashlib.sha512()
-        else:
-            return None
-
-        file_reader = open(file, 'rb')
-        while True:
-            file_bytes = file_reader.read(16 * 1024 * 1024)
-            if not file_bytes:
-                break
-            hash_function.update(file_bytes)
-        del file_bytes
-        file_reader.close()
-        file_hash = hash_function.hexdigest()
+    if algorithm == 'sha256':
+        hash_function = hashlib.sha256()
+    elif algorithm == 'sha1':
+        hash_function = hashlib.sha1()
+    elif algorithm == 'md5':
+        hash_function = hashlib.md5()
+    elif algorithm == 'sha512':
+        hash_function = hashlib.sha512()
     else:
-        c = None
-        while c is None:
-            hashes = []
-            for i in range(count):
-                hashes.append(get_file_hash(file, algorithm))
-            c = Counter(hashes)
-            if strict:
-                if c[c.keys()[0]] != count:
-                    c = None
-            else:
-                return c.keys()[0]
+        return None
+
+    file_reader = open(file, 'rb')
+    while True:
+        file_bytes = file_reader.read(16 * 1024 * 1024)
+        if not file_bytes:
+            break
+        hash_function.update(file_bytes)
+    del file_bytes
+    file_reader.close()
+    file_hash = hash_function.hexdigest()
     return file_hash
 
 
