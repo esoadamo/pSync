@@ -33,7 +33,8 @@ def main():
     if len(Params.sys_args) == 0 or Params.param_exists("-help") or Params.param_exists("-h") \
             or Params.param_exists("/?") or Params.get_param('-d') is None:
         print("Usage: " + sys.argv[0] + " -d source_directory [-t target_directory] [-a algorithm] [-c]"
-                                        " [-s hash file] [-r] [-v] [-V] [--sql] [--abs]")
+                                        " [-s hash file] [-r] [-v] [-V] [--no-sql [--allow-rename]] "
+                                        "[--abs] [--no-info]")
         print("-s where to save hashes")
         print("-t where to move modified file")
         print("-a algorithm to use, default SHA256. Available: sha512 (super-secure), sha256 (default), "
@@ -41,8 +42,10 @@ def main():
         print("-c wait for confirmation before copying files")
         print("-v verbose")
         print("-V prints version and exits")
-        print("--sql use sql database instead of txt file (saves disk usage)")
+        print("--no-sql do NOT use sql database instead of txt file (saves disk usage)")
+        print('--allow-rename passing this will cause no-sql mode to look for renamed files. Can take very long time')
         print("--abs save file absolute paths of the files in database")
+        print("--no-info prints just list of modified files")
         exit(0)
 
     """
@@ -60,7 +63,9 @@ def main():
     verbose = Params.param_exists('-v')  # When true prints really much output about progress
     target_dir = Params.get_param('-t')  # If set, modified files will be copied into this directory
     wait_for_confirmation = Params.param_exists('-c')  # If set, ask user before actions like coping
-    use_sql = Params.param_exists("--sql")  # Use plaintext vs sql database format
+    use_sql = not Params.param_exists("--no-sql")  # Use plaintext vs sql database format
+    list_only = Params.param_exists("--no-info")  # Do not print info about how many files were listed etc
+    no_sql_allow_rename = Params.param_exists("--allow-rename")
 
     # For better formatting make sure that this directory path is complete
     if target_dir is not None and not target_dir.endswith(os.sep):
@@ -90,6 +95,8 @@ def main():
     modified_files = []  # List with paths to modified files
     deleted_files = []  # List with paths to deleted file
     new_files = []  # List of new files
+    renamed_hashes = []  # List of hashes that have been renamed
+    renamed_files = {}  # Keys are files before renaming, values are their new names
     no_modifications = True  # False when any file is added/changed/deleted
 
     hash_file_writer = None  # In clear text mode this is writer to temp file where hashes are stored
@@ -103,11 +110,13 @@ def main():
 
     # Load hashes from database/data file
     if mode_check:
-        print('Loading saved hashes')
+        if not list_only:
+            print('Loading saved hashes')
         hashes = {}  # Dictionary with hashes - key is file path, value is file hash
         if use_sql:
             sql.execute("UPDATE hashes SET found=0")
-            print('%d hashes loaded' % sql.execute("SELECT COUNT(*) FROM hashes").fetchone()[0])
+            if not list_only:
+                print('%d hashes loaded' % sql.execute("SELECT COUNT(*) FROM hashes").fetchone()[0])
         else:
             with open(save_hash_file_path, 'rt') as f:
                 hashes_txt = f.read().split('\n')
@@ -118,9 +127,11 @@ def main():
                 if len(split) == 2:
                     hashes[split[1]] = split[0]
                 else:
-                    print('Wrong formatted line ' + line)
+                    if not list_only:
+                        print('Wrong formatted line ' + line)
             hash_file_writer = open(save_hash_file_path_tmp, 'wt')  # Better not overwrite already saved hashes
-            print('%d hashes loaded' % len(hashes))
+            if not list_only:
+                print('%d hashes loaded' % len(hashes))
 
     # Not checking -> first run -> create new database/data file
     else:
@@ -131,14 +142,16 @@ def main():
             hash_file_writer = open(save_hash_file_path, 'wt')  # Better not overwrite already saved hashes
 
     # List all files (not directories) that will be hashed
-    print('Listing directory')
+    if not list_only:
+        print('Listing directory')
     files = list_files(source_dir, directories=False)
 
     if files is None:
         print(source_dir + " is not a valid file/directory.")
         exit(1)
 
-    print('Found %d files' % len(files))
+    if not list_only:
+            print('Found %d files' % len(files))
     for file_index, file in enumerate(files):
         if not os.path.isfile(file):
             # If file does not exist, but during listing did, it was deleted during hashing process
@@ -162,7 +175,7 @@ def main():
             file_already_hashed = False
             database_hash = None
             if use_sql:
-                sql_result = sql.execute("SELECT hash FROM hashes WHERE file=?", (file, )).fetchone()
+                sql_result = sql.execute("SELECT hash FROM hashes WHERE file=?", (file,)).fetchone()
                 if sql_result is not None and len(sql_result) > 0:
                     file_already_hashed = True
                     database_hash = sql_result[0]
@@ -189,12 +202,46 @@ def main():
                 if not use_sql:
                     hashes.pop(file, None)  # Delete this hash from memory when found
             else:
-                line = 'NEW' + line
-                no_modifications = False
-                force_verbose = True
-                new_files.append(file)
+                # File appears to be new, but we will check if it is not just renamed (if we have it already hashed)
+                file_is_renamed = False  # Can be False or name of file before renaming
                 if use_sql:
-                    sql.execute("INSERT INTO hashes VALUES (?, ?, ?, 1)", (file, file_hash, time_start))
+                    sql_result = sql.execute("SELECT file FROM hashes WHERE hash=?", (file_hash,)).fetchone()
+                    if sql_result is not None and len(sql_result) == 1 and file_hash not in renamed_hashes:
+                        # When we have more than 1 file with same hash it database it means that we have multiple copies
+                        # of the same file. Therefore cannot we say which of them was renamed.
+                        file_is_renamed = sql_result[0]
+                        renamed_hashes.append(file_hash)
+                        sql.execute("UPDATE hashes SET file=?, modified=?, found=1 "
+                                    "WHERE file=?", (file, time_start, file_is_renamed))
+                else:
+                    really_do_not_care_about_time_i_spend_computing = no_sql_allow_rename
+                    # When True, we have to go through WHOLE database for EVERY single file
+                    if really_do_not_care_about_time_i_spend_computing and file_hash not in renamed_hashes:
+                        files_with_same_hashes_count = 0
+                        file_is_renamed_temp = None
+                        for database_file, database_hash in hashes.items():
+                            if database_hash == file_hash:
+                                file_is_renamed_temp = database_file
+                                files_with_same_hashes_count += 1
+                        if files_with_same_hashes_count == 1:
+                            # When we have more than 1 file with same hash it database it means that we have
+                            #  multiple copies of the same file. Therefore cannot we say which of them was renamed.
+                            file_is_renamed = file_is_renamed_temp
+                        del file_is_renamed_temp
+                    # End of if really_do_not_care_about_time_i_spend_computing:
+                if not file_is_renamed:
+                    line = 'NEW ' + line
+                    no_modifications = False
+                    force_verbose = True
+                    new_files.append(file)
+                    if use_sql:
+                        sql.execute("INSERT INTO hashes VALUES (?, ?, ?, 1)", (file, file_hash, time_start))
+                else:  # File is renamed
+                    force_verbose = True
+                    line = 'RENAMED %s to ' % file_is_renamed + line
+                    no_modifications = False
+                    renamed_files[file_is_renamed] = file  # Key is name before renaming, value is new name
+
         else:
             line = 'INDEXED ' + line
             new_files.append(file)
@@ -206,7 +253,6 @@ def main():
         if verbose:
             print(line)
         if force_verbose:
-
             verbose = verbose_bck
     """
     All hashing was completed
@@ -238,12 +284,15 @@ def main():
         if no_modifications:
             print('No modifications made')
         else:
-            print('%d files added, %d changed, deleted %d' % (len(new_files), len(modified_files), len(deleted_files)))
+            if not list_only:
+                print('%d files added, %d changed, deleted %d, renamed %d' % (len(new_files), len(modified_files),
+                                                                              len(deleted_files), len(renamed_files)))
 
         if not use_sql:  # Move clear text tmp file and overwrite persistent hashes file
             shutil.move(save_hash_file_path_tmp, save_hash_file_path)
     else:
-        print('First indexing completed')
+        if not list_only:
+            print('First indexing completed')
     """
     Saving info about this session done
     """
@@ -258,7 +307,8 @@ def main():
             if not input_yes_no("Do you want to copy modified and delete removed files?"):
                 print('Ok, by then')
                 exit(0)
-        print('Copying changed files')
+            if not list_only:
+                    print('Copying changed files')
         for file in modified_files:
             source_file = source_dir + file
             target_file = target_dir + file
@@ -283,11 +333,12 @@ def main():
                 if verbose:
                     print('Deleting "%s"' % target_file)
                 os.remove(target_file)
+    # TODO Implement renaming
     """
     Updating backup done
     """
-
-    print('Done')
+    if not list_only:
+        print('Done')
 
 
 def list_files(directory, relative=False, files=True, directories=True):
