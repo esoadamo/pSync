@@ -1,3 +1,4 @@
+#!/usr//bin/python3
 """
 Copyright 2016 Adam Hlaváček
 
@@ -22,7 +23,7 @@ import shutil
 import sqlite3
 import time
 
-version = 0.8
+version = "Aardonyx"
 
 
 def main():
@@ -34,11 +35,12 @@ def main():
             or Params.param_exists("/?") or Params.get_param('-d') is None:
         print("Usage: " + sys.argv[0] + " -d source_directory [-t target_directory] [-a algorithm] [-c]"
                                         " [-s hash file] [-r] [-v] [-V] [--no-sql [--allow-rename]] "
-                                        "[--abs] [--no-info]")
+                                        "[--abs] [--no-info] [--recheck]")
         print("-s where to save hashes")
         print("-t where to move modified file")
         print("-a algorithm to use, default SHA256. Available: sha512 (super-secure), sha256 (default), "
-              "sha1 (good-enough for home data), md5 (fastest)")
+              "sha1 (good-enough for home data), md5 (fast, but weak),"
+              "time (super fast, takes file's last modification time and size)")
         print("-c wait for confirmation before copying files")
         print("-v verbose")
         print("-V prints version and exits")
@@ -46,6 +48,7 @@ def main():
         print('--allow-rename passing this will cause no-sql mode to look for renamed files. Can take very long time')
         print("--abs save file absolute paths of the files in database")
         print("--no-info prints just list of modified files")
+        print("--recheck when a modified file is found, this tell us to look again if there was an error")
         exit(0)
 
     """
@@ -66,6 +69,7 @@ def main():
     use_sql = not Params.param_exists("--no-sql")  # Use plaintext vs sql database format
     list_only = Params.param_exists("--no-info")  # Do not print info about how many files were listed etc
     no_sql_allow_rename = Params.param_exists("--allow-rename")
+    recheck_hash = Params.param_exists('--recheck')
 
     # For better formatting make sure that this directory path is complete
     if target_dir is not None and not target_dir.endswith(os.sep):
@@ -88,6 +92,9 @@ def main():
     algorithm = Params.get_param('-a')
     if algorithm is None:
         algorithm = 'sha256'
+
+    if recheck_hash and not list_only:
+        print('Warning: Recheck is enabled. This can take a long time.')
 
     # If file with hashes already exists, load them and check if they changed
     mode_check = os.path.isfile(save_hash_file_path)
@@ -157,7 +164,7 @@ def main():
             # If file does not exist, but during listing did, it was deleted during hashing process
             deleted_files.append(file)
             continue
-        file_hash = get_file_hash(file, algorithm)
+        file_hash = get_file_hash(file, algorithm, recheck_hash, verbose)
         if file_hash is None:
             print('Unknown algorithm "%s"' % algorithm)
             exit(0)
@@ -181,10 +188,9 @@ def main():
                     database_hash = sql_result[0]
                 del sql_result
             else:
-                for database_file, database_hash in hashes.items():
-                    if database_file == file:
-                        file_already_hashed = True
-                        break
+                if file in hashes:
+                    file_already_hashed = True
+                    database_hash = hashes[file]
             if file_already_hashed:
                 if file_hash == database_hash:
                     line = 'OK ' + line
@@ -375,35 +381,49 @@ def get_file_name(path):
     return tail or os.path.basename(head)
 
 
-def get_file_hash(file, algorithm):
+def get_file_hash(file, algorithm, recheck=False, verbose=False):
     """
     Hashes file and returns its hash
     :param file: file to be hashed
     :param algorithm: algorithm used for hashing
+    :param recheck: when set to True, hash is repeated until 2 same values are found
+    :param verbose: if set to true prints rechecking hashes
     :return: hash of the file or None when file does not exists or None when wrong algorithm is used
     """
     if not os.path.isfile(file):
         return None
     if algorithm == 'sha256':
-        hash_function = hashlib.sha256()
+        hash_function = hashlib.sha256
     elif algorithm == 'sha1':
-        hash_function = hashlib.sha1()
+        hash_function = hashlib.sha1
     elif algorithm == 'md5':
-        hash_function = hashlib.md5()
+        hash_function = hashlib.md5
     elif algorithm == 'sha512':
-        hash_function = hashlib.sha512()
+        hash_function = hashlib.sha512
+    elif algorithm == 'time':
+        return str(int(os.path.getsize(file))) + ":" + str(int(os.path.getmtime(file)))
     else:
         return None
 
-    file_reader = open(file, 'rb')
+    file_hashes = []
+    try_num = 0
     while True:
-        file_bytes = file_reader.read(16 * 1024 * 1024)
-        if not file_bytes:
+        hasher = hash_function()
+        try_num += 1
+        with open(file, 'rb') as file_reader:
+            file_reader.seek(0)
+            while True:
+                file_bytes = file_reader.read(16 * 1024 * 1024)
+                if not file_bytes:
+                    break
+                hasher.update(file_bytes)
+        del file_bytes
+        file_hash = hasher.hexdigest()
+        if verbose and recheck:
+            print('Try %d generated hash %s' % (try_num, file_hash))
+        if not recheck or file_hash in file_hashes or len(file_hashes) >= 50:
             break
-        hash_function.update(file_bytes)
-    del file_bytes
-    file_reader.close()
-    file_hash = hash_function.hexdigest()
+        file_hashes.append(file_hash)
     return file_hash
 
 
